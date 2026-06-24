@@ -948,6 +948,7 @@ function speak(text) {
   // Google Translate TTS — works on all devices, no voice pack needed, requires internet
   const url = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q=' + encodeURIComponent(text);
   const audio = new Audio(url);
+  audio.referrerPolicy = 'no-referrer';
   audio.onended = done;
   audio.onerror = () => { done(); _speakNative(text); };
   audio.play().catch(() => { done(); _speakNative(text); });
