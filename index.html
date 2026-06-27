@@ -1186,11 +1186,13 @@ function buildWeightedDeck(cards) {
     const s     = stats[c.hz];
     const total = s ? s.r + s.w : 0;
     const err   = total > 0 ? s.w / total : 0.4;  // unseen → medium priority
-    return { c, score: err + Math.random() * 0.15 };
+    // Chọn ngẫu nhiên có trọng số: từ hay sai có cơ hội cao hơn, nhưng mỗi lần một khác
+    return { c, score: Math.random() * (1 + err * 1.5) };
   });
   scored.sort((a, b) => b.score - a.score);
   const pool = scored.map(x => x.c);
-  return batchSize > 0 ? pool.slice(0, batchSize) : pool;
+  const picked = batchSize > 0 ? pool.slice(0, batchSize) : pool;
+  return shuffle(picked);   // xáo trộn thứ tự trình bày cho ngẫu nhiên hoàn toàn
 }
 
 function updateStatsDisplay() {
