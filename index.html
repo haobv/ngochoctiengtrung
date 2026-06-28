@@ -435,7 +435,7 @@ button:active { transform: scale(0.97); }
     <button class="mode-btn" data-mode="speak" id="mode-speak-btn">🎤 Tập nói</button>
   </div>
   <div class="sp-warn" id="speak-warn" style="display:none;margin-bottom:18px">
-    Chế độ tập nói cần trình duyệt hỗ trợ nhận diện giọng nói — hãy dùng <b>Chrome</b> hoặc <b>Edge</b>.
+    Trình duyệt không hỗ trợ ghi âm để tập nói — hãy cập nhật trình duyệt hoặc thử <b>Chrome</b>.
   </div>
 
   <div id="content-options" style="display:none">
@@ -1144,22 +1144,35 @@ if (window.speechSynthesis) {
   speechSynthesis.onvoiceschanged = _load;
 }
 
-function _speakNative(text) {
-  if (!window.speechSynthesis) return;
+const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+
+function _speakNative(text, immediate) {
+  if (!window.speechSynthesis) return false;
   speechSynthesis.cancel();
-  setTimeout(() => {
+  const go = () => {
     const u = new SpeechSynthesisUtterance(text);
     if (_zhVoice) { u.voice = _zhVoice; u.lang = _zhVoice.lang; } else { u.lang = 'zh-CN'; }
     u.rate = 0.85;
     speechSynthesis.speak(u);
-  }, 50);
+  };
+  // Trên di động phải phát NGAY trong thao tác chạm, không được trì hoãn (iOS chặn)
+  if (immediate) go(); else setTimeout(go, 50);
+  return true;
 }
 
 function speak(text) {
   const btn = $('btn-speak');
   const done = () => btn && btn.classList.remove('active');
   btn && btn.classList.add('active');
-  // Google Translate TTS — works on all devices, no voice pack needed, requires internet
+
+  // Di động: dùng giọng máy ngay trong cử chỉ chạm — đáng tin hơn, không phụ thuộc mạng
+  if (IS_MOBILE && window.speechSynthesis) {
+    done();
+    _speakNative(text, true);
+    return;
+  }
+
+  // Máy tính: Google Translate TTS (giọng nữ ổn định), lỗi thì dùng giọng máy
   const url = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q=' + encodeURIComponent(text);
   const audio = new Audio(url);
   audio.referrerPolicy = 'no-referrer';
@@ -1462,6 +1475,7 @@ function makeRecognizer() {
 function stopRecog() {
   clearTimeout(_recogTimer);
   if (_recog) { try { _recog.abort(); } catch {} _recog = null; }
+  if (typeof abortWhisper === 'function') abortWhisper();
 }
 
 function normHz(s) { return (s || '').replace(/[\s\p{P}\p{S}]/gu, ''); }
@@ -2044,7 +2058,9 @@ function renderSpeak() {
   $('sp-hz').textContent          = c.hz;
   $('sp-hz').className             = [...c.hz].length > 4 ? 'sp-hz long' : 'sp-hz';
   $('sp-vi').textContent          = c.vi;
-  $('sp-fb').textContent          = 'Bấm micro rồi đọc to chữ trên';
+  $('sp-fb').textContent          = SPEECH_OK
+    ? 'Bấm micro rồi đọc to chữ trên'
+    : 'Bấm micro, đọc xong bấm lại (lần đầu tải bộ nhận diện)';
   $('sp-fb').className            = 'sp-fb';
   $('sp-compare').style.display   = 'none';
   $('sp-mic').className           = 'sp-mic';
@@ -2057,8 +2073,124 @@ function renderSpeak() {
   $('sp-score-val').textContent   = score;
 }
 
+// ── Whisper trong trình duyệt — fallback cho máy thiếu Web Speech API (vd iPhone) ──
+const WHISPER_MODEL = 'Xenova/whisper-small';
+let _asr = null, _asrLoading = null;
+let _media = null, _mediaStream = null, _chunks = [], _recording = false, _mediaTimer = null;
+
+async function getASR() {
+  if (_asr) return _asr;
+  if (!_asrLoading) {
+    _asrLoading = (async () => {
+      const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+      mod.env.allowLocalModels = false;
+      _asr = await mod.pipeline('automatic-speech-recognition', WHISPER_MODEL, {
+        quantized: true,
+        progress_callback: p => {
+          if (p.status === 'progress' && typeof p.progress === 'number') {
+            $('sp-fb').className   = 'sp-fb';
+            $('sp-fb').textContent = `⏬ Đang tải bộ nhận diện… ${Math.round(p.progress)}% (chỉ lần đầu)`;
+          }
+        }
+      });
+      return _asr;
+    })();
+  }
+  return _asrLoading;
+}
+
+function resampleTo16k(data, srcRate) {
+  if (srcRate === 16000) return data;
+  const ratio = srcRate / 16000;
+  const len = Math.round(data.length / ratio);
+  const out = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const x = i * ratio, i0 = Math.floor(x), i1 = Math.min(i0 + 1, data.length - 1);
+    out[i] = data[i0] + (data[i1] - data[i0]) * (x - i0);
+  }
+  return out;
+}
+
+async function transcribeBlob(blob) {
+  const buf  = await blob.arrayBuffer();
+  const Ctx  = window.AudioContext || window.webkitAudioContext;
+  const actx = new Ctx();
+  const decoded = await actx.decodeAudioData(buf);
+  if (actx.close) actx.close();
+  const pcm = resampleTo16k(decoded.getChannelData(0), decoded.sampleRate);
+  const asr = await getASR();
+  const out = await asr(pcm, { language: 'chinese', task: 'transcribe' });
+  return ((out && out.text) || '').trim();
+}
+
+function pickMime() {
+  const cands = ['audio/webm', 'audio/mp4', 'audio/aac'];
+  for (const m of cands) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
+
+function abortWhisper() {
+  clearTimeout(_mediaTimer);
+  _recording = false;
+  if (_media) { try { _media.onstop = null; _media.stop(); } catch {} _media = null; }
+  if (_mediaStream) { try { _mediaStream.getTracks().forEach(t => t.stop()); } catch {} _mediaStream = null; }
+}
+
+async function listenWhisper() {
+  if (_recording) { stopWhisperRecording(); return; }   // bấm lại để dừng ghi
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+    $('sp-fb').textContent = 'Thiết bị không hỗ trợ ghi âm'; $('sp-fb').className = 'sp-fb err'; return;
+  }
+  try { _mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { $('sp-fb').textContent = 'Bạn cần cho phép dùng micro'; $('sp-fb').className = 'sp-fb err'; return; }
+
+  const mime = pickMime();
+  _media  = mime ? new MediaRecorder(_mediaStream, { mimeType: mime }) : new MediaRecorder(_mediaStream);
+  _chunks = [];
+  _media.ondataavailable = e => { if (e.data && e.data.size) _chunks.push(e.data); };
+  _media.onstop = async () => {
+    if (_mediaStream) { _mediaStream.getTracks().forEach(t => t.stop()); _mediaStream = null; }
+    _recording = false;
+    const blob = new Blob(_chunks, { type: (_media && _media.mimeType) || 'audio/webm' });
+    $('sp-mic').className = 'sp-mic';
+    $('sp-mic').disabled  = true;
+    $('sp-fb').className   = 'sp-fb';
+    $('sp-fb').textContent = '⏳ Đang nhận diện…';
+    try {
+      const text = await transcribeBlob(blob);
+      $('sp-mic').disabled = false;
+      if (graded) return;
+      if (!text) { $('sp-fb').textContent = 'Chưa nghe rõ — bấm micro thử lại'; $('sp-fb').className = 'sp-fb'; return; }
+      gradeSpeak([text]);
+    } catch (err) {
+      $('sp-mic').disabled = false;
+      $('sp-fb').textContent = 'Lỗi nhận diện — bấm thử lại'; $('sp-fb').className = 'sp-fb err';
+    }
+  };
+
+  _recording = true;
+  $('sp-mic').className   = 'sp-mic listening';
+  $('sp-fb').className    = 'sp-fb';
+  $('sp-fb').textContent  = '🎙️ Đang ghi… bấm lại để xong';
+  try { _media.start(); } catch { abortWhisper(); return; }
+  clearTimeout(_mediaTimer);
+  _mediaTimer = setTimeout(() => { if (_recording) stopWhisperRecording(); }, 8000);  // tự dừng sau 8s
+}
+
+function stopWhisperRecording() {
+  clearTimeout(_mediaTimer);
+  if (_media && _recording) { try { _media.stop(); } catch {} }
+}
+
 function listen() {
   if (graded) return;
+  if (SPEECH_OK) return listenNative();
+  return listenWhisper();
+}
+
+function listenNative() {
   stopRecog();                       // dọn phiên cũ nếu còn treo
   const r = _recog = makeRecognizer();
   if (!r) return;
@@ -2222,10 +2354,11 @@ document.addEventListener('keydown', e => {
   if (!done) check(); else next();
 });
 
-// Disable speak mode if browser has no speech recognition
-if (!SPEECH_OK) {
-  const sb = $('mode-speak-btn');
-  sb.disabled = true;
+// Máy không có Web Speech API (vd iPhone): vẫn cho tập nói bằng Whisper trong máy.
+// Chỉ khóa khi không ghi âm được (thiếu MediaRecorder/getUserMedia).
+const CAN_RECORD = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+if (!SPEECH_OK && !CAN_RECORD) {
+  $('mode-speak-btn').disabled = true;
   $('speak-warn').style.display = 'block';
 }
 
