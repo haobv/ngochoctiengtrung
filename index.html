@@ -1320,6 +1320,15 @@ function startDeck(cards) {
   wrongCards = [];
   hideAllCards();
   showCurrent();
+  // Máy dùng Whisper: tải sẵn model ngay để lần ghi đầu không bị chờ/tải dở
+  if (mode === 'speak' && CAN_RECORD && (!SPEECH_OK || _preferWhisper)) {
+    getASR().then(() => {
+      if (!graded && $('speak-card').style.display !== 'none') {
+        $('sp-fb').textContent = 'Bấm micro để ghi, đọc xong bấm lại để chấm';
+        $('sp-fb').className = 'sp-fb';
+      }
+    }).catch(() => {});
+  }
 }
 
 function start() {
@@ -2197,7 +2206,7 @@ async function listenWhisper() {
   $('sp-mic').className   = 'sp-mic listening';
   $('sp-fb').className    = 'sp-fb';
   $('sp-fb').textContent  = '🔴 Đang ghi… bấm lại để dừng & chấm';
-  try { _media.start(); } catch { abortWhisper(); return; }
+  try { _media.start(200); } catch { abortWhisper(); return; }
   clearTimeout(_mediaTimer);
   _mediaTimer = setTimeout(() => { if (_recording) stopWhisperRecording(); }, 6000);  // tự dừng sau 6s
 }
