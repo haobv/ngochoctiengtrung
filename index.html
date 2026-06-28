@@ -1145,6 +1145,8 @@ if (window.speechSynthesis) {
 }
 
 const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 function _speakNative(text, immediate) {
   if (!window.speechSynthesis) return false;
@@ -2058,9 +2060,9 @@ function renderSpeak() {
   $('sp-hz').textContent          = c.hz;
   $('sp-hz').className             = [...c.hz].length > 4 ? 'sp-hz long' : 'sp-hz';
   $('sp-vi').textContent          = c.vi;
-  $('sp-fb').textContent          = SPEECH_OK
+  $('sp-fb').textContent          = (SPEECH_OK && !_preferWhisper)
     ? 'Bấm micro rồi đọc to chữ trên'
-    : 'Bấm micro, đọc xong bấm lại (lần đầu tải bộ nhận diện)';
+    : 'Bấm micro để ghi, đọc xong bấm lại để chấm';
   $('sp-fb').className            = 'sp-fb';
   $('sp-compare').style.display   = 'none';
   $('sp-mic').className           = 'sp-mic';
@@ -2074,7 +2076,7 @@ function renderSpeak() {
 }
 
 // ── Whisper trong trình duyệt — fallback cho máy thiếu Web Speech API (vd iPhone) ──
-const WHISPER_MODEL = 'Xenova/whisper-small';
+const WHISPER_MODEL = 'Xenova/whisper-base';   // base ~75MB: cân bằng tốt, ổn định trên điện thoại
 let _asr = null, _asrLoading = null;
 let _media = null, _mediaStream = null, _chunks = [], _recording = false, _mediaTimer = null;
 let _preferWhisper = false;   // bật khi Web Speech API lỗi dịch vụ (vd service-not-allowed)
@@ -2120,6 +2122,8 @@ async function transcribeBlob(blob) {
   if (actx.close) actx.close();
   const pcm = resampleTo16k(decoded.getChannelData(0), decoded.sampleRate);
   const asr = await getASR();
+  $('sp-fb').className = 'sp-fb';
+  $('sp-fb').textContent = '⏳ Đang nhận diện…';
   const out = await asr(pcm, { language: 'chinese', task: 'transcribe' });
   return ((out && out.text) || '').trim();
 }
@@ -2174,10 +2178,10 @@ async function listenWhisper() {
   _recording = true;
   $('sp-mic').className   = 'sp-mic listening';
   $('sp-fb').className    = 'sp-fb';
-  $('sp-fb').textContent  = '🎙️ Đang ghi… bấm lại để xong';
+  $('sp-fb').textContent  = '🔴 Đang ghi… bấm lại để dừng & chấm';
   try { _media.start(); } catch { abortWhisper(); return; }
   clearTimeout(_mediaTimer);
-  _mediaTimer = setTimeout(() => { if (_recording) stopWhisperRecording(); }, 8000);  // tự dừng sau 8s
+  _mediaTimer = setTimeout(() => { if (_recording) stopWhisperRecording(); }, 6000);  // tự dừng sau 6s
 }
 
 function stopWhisperRecording() {
@@ -2210,6 +2214,7 @@ function listenNative() {
     const svcDown = e.error === 'service-not-allowed' || e.error === 'network' || e.error === 'language-not-supported';
     if (svcDown && CAN_RECORD) {
       _preferWhisper = true;
+      try { localStorage.setItem('use_whisper', '1'); } catch {}
       $('sp-mic').className   = 'sp-mic';
       $('sp-fb').className    = 'sp-fb';
       $('sp-fb').textContent  = 'Bấm micro lại để dùng nhận diện trong máy';
@@ -2372,6 +2377,10 @@ if (!SPEECH_OK && !CAN_RECORD) {
   $('mode-speak-btn').disabled = true;
   $('speak-warn').style.display = 'block';
 }
+// iOS (Web Speech hay lỗi service-not-allowed) hoặc máy từng lỗi → dùng Whisper ngay từ đầu
+let _whisperLearned = false;
+try { _whisperLearned = localStorage.getItem('use_whisper') === '1'; } catch {}
+if (CAN_RECORD && (IS_IOS || _whisperLearned)) _preferWhisper = true;
 
 // show start screen on load
 updateStatsDisplay();
