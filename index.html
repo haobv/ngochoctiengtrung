@@ -2077,6 +2077,7 @@ function renderSpeak() {
 const WHISPER_MODEL = 'Xenova/whisper-small';
 let _asr = null, _asrLoading = null;
 let _media = null, _mediaStream = null, _chunks = [], _recording = false, _mediaTimer = null;
+let _preferWhisper = false;   // bật khi Web Speech API lỗi dịch vụ (vd service-not-allowed)
 
 async function getASR() {
   if (_asr) return _asr;
@@ -2186,7 +2187,7 @@ function stopWhisperRecording() {
 
 function listen() {
   if (graded) return;
-  if (SPEECH_OK) return listenNative();
+  if (SPEECH_OK && !_preferWhisper) return listenNative();
   return listenWhisper();
 }
 
@@ -2205,6 +2206,15 @@ function listenNative() {
   r.onerror  = e => {
     clearTimeout(_recogTimer);
     if (graded) return;
+    // Dịch vụ nhận diện của trình duyệt bị chặn → chuyển sang Whisper trong máy
+    const svcDown = e.error === 'service-not-allowed' || e.error === 'network' || e.error === 'language-not-supported';
+    if (svcDown && CAN_RECORD) {
+      _preferWhisper = true;
+      $('sp-mic').className   = 'sp-mic';
+      $('sp-fb').className    = 'sp-fb';
+      $('sp-fb').textContent  = 'Bấm micro lại để dùng nhận diện trong máy';
+      return;
+    }
     $('sp-mic').className = 'sp-mic';
     $('sp-fb').textContent = e.error === 'no-speech'
       ? 'Không nghe thấy gì — bấm micro thử lại'
@@ -2213,6 +2223,7 @@ function listenNative() {
   };
   r.onend = () => {
     clearTimeout(_recogTimer);
+    if (_recording) return;   // đang ghi âm cho Whisper, không đụng vào
     if (!graded && $('sp-mic').classList.contains('listening')) {
       $('sp-mic').className = 'sp-mic';
       $('sp-fb').textContent = 'Chưa nghe rõ — bấm micro thử lại';
