@@ -1150,10 +1150,13 @@ const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
 
 function _speakNative(text, immediate) {
   if (!window.speechSynthesis) return false;
-  speechSynthesis.cancel();
+  // Chỉ hủy khi đang nói dở — gọi cancel() ngay trước speak() khiến iOS bỏ luôn câu mới
+  if (speechSynthesis.speaking || speechSynthesis.pending) { try { speechSynthesis.cancel(); } catch {} }
   const go = () => {
+    try { speechSynthesis.resume(); } catch {}
     const u = new SpeechSynthesisUtterance(text);
-    if (_zhVoice) { u.voice = _zhVoice; u.lang = _zhVoice.lang; } else { u.lang = 'zh-CN'; }
+    const v = _zhVoice || speechSynthesis.getVoices().find(x => /^zh/i.test(x.lang));
+    if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = 'zh-CN'; }
     u.rate = 0.85;
     speechSynthesis.speak(u);
   };
@@ -1167,8 +1170,14 @@ function speak(text) {
   const done = () => btn && btn.classList.remove('active');
   btn && btn.classList.add('active');
 
-  // Google Translate TTS — giọng nữ ổn định, không cần giọng cài sẵn, chạy ngay trong thao tác chạm.
-  // Lỗi (mất mạng/chặn) thì dùng giọng máy của thiết bị; trên di động phát ngay để không bị iOS chặn.
+  // iPhone/iPad: dùng giọng đọc hệ thống — ít bị công tắc im lặng chặn hơn so với <audio> của Google TTS
+  if (IS_IOS && window.speechSynthesis) {
+    done();
+    _speakNative(text, true);
+    return;
+  }
+
+  // Máy khác: Google Translate TTS (giọng nữ ổn định), lỗi thì dùng giọng máy
   let fell = false;
   const fallback = () => { if (fell) return; fell = true; done(); _speakNative(text, true); };
   const url = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q=' + encodeURIComponent(text);
