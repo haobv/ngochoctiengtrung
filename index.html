@@ -2007,6 +2007,18 @@ function hzToPy(text) {
   return [...t].map(ch => CHAR_PY[ch] || PY_DICT[ch] || ch).join(' ');
 }
 
+// Pinyin 1 chữ, bỏ dấu thanh (để chấm theo ÂM, không phân biệt chữ đồng âm)
+function toneless(s) {
+  return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/ü/g, 'v').replace(/[^a-z]/g, '');
+}
+function sylOf(ch) { return toneless(CHAR_PY[ch] || PY_DICT[ch] || ''); }
+
+// Dãy âm tiết (toneless) theo từng chữ Hán của chuỗi
+function syllables(hz) {
+  return [...hz].filter(ch => /[一-鿿]/.test(ch)).map(sylOf);
+}
+
 // LCS giữa "bạn nói" (h) và "đáp án" (t): đánh dấu chữ khớp ở cả hai phía
 function lcsFlags(h, t) {
   const H = [...h], T = [...t];
@@ -2249,32 +2261,34 @@ function listenNative() {
 
 function gradeSpeak(alts) {
   stopRecog();
-  const c       = deck[idx];
-  const target  = normHz(c.hz);
-  // chọn phương án nhận diện khớp nhất
-  let bestRaw = alts[0] || '', dist = Infinity;
+  const c        = deck[idx];
+  const tSyls    = syllables(c.hz);
+  // Chấm theo ÂM: chọn phương án nhận diện có nhiều âm tiết khớp nhất (bỏ qua chữ đồng âm)
+  let best = { raw: alts[0] || '', hOk: [], tOk: [], matched: -1 };
   for (const a of alts) {
-    const d = levenshtein(normHz(a), target);
-    if (d < dist) { dist = d; bestRaw = a; }
-    if (d === 0) break;
+    const hSyls = syllables(normHz(a));
+    const { hOk, tOk } = lcsFlags(hSyls, tSyls);
+    const matched = tOk.filter(Boolean).length;
+    if (matched > best.matched) best = { raw: a, hOk, tOk, matched, hSyls };
   }
-  // ngưỡng "gần đúng" giãn theo độ dài: câu dài cho phép lệch nhiều hơn
-  const tol   = Math.max(1, Math.floor(target.length * 0.25));
-  const exact = dist === 0;
-  const near  = !exact && target.length > 0 && dist <= tol;
-  const pass  = exact || near;
+  const { raw, hOk, tOk, matched } = best;
+  const missing = tSyls.length - matched;                 // âm tiết đáp án bị thiếu/sai
+  const extra   = (best.hSyls ? best.hSyls.length : 0) - matched;  // âm tiết nói thừa
+  const tol     = Math.floor(tSyls.length * 0.25);        // 0 với câu ngắn
+  const exact   = tSyls.length > 0 && missing === 0 && extra === 0;
+  const near    = !exact && missing <= tol && extra <= Math.max(1, tol);
+  const pass    = exact || near;
 
   const cls = exact ? 'ok' : near ? 'near' : 'err';
-  const shown = bestRaw || '—';
+  const shown = raw || '—';
   $('sp-mic').className   = 'sp-mic ' + cls;
   $('sp-fb').className    = 'sp-fb ' + cls;
   $('sp-fb').textContent  = exact ? '✓ Chính xác!'
                           : near  ? '~ Gần đúng — đọc lại cho chuẩn nhé'
                           :         '✗ Chưa đúng, thử lại nào';
-  const { hOk, tOk } = lcsFlags(normHz(shown), target);
   $('sp-heard').className   = 'sp-heard';
   $('sp-heard').innerHTML   = renderColored(shown, hOk);
-  $('sp-heard-py').textContent = exact ? c.py : hzToPy(shown);
+  $('sp-heard-py').textContent = hzToPy(shown);
   $('sp-answer').innerHTML  = renderColored(c.hz, tOk);
   $('sp-answer-py').textContent = c.py;
   $('sp-compare').style.display = 'block';
