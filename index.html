@@ -747,6 +747,8 @@ function normPy(s) {
   return s.toLowerCase()
     .split('').map(c => TONE[c] ?? c).join('')
     .replace(/[1-5]/g, '')
+    .replace(/:/g, '')      // dạng "lu:" cho ü
+    .replace(/v/g, 'u')     // ü có thể gõ thành u / v / ü đều chấp nhận
     .replace(/\s+/g, '');
 }
 
