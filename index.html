@@ -1324,7 +1324,7 @@ function startDeck(cards) {
   if (mode === 'speak' && CAN_RECORD && (!SPEECH_OK || _preferWhisper)) {
     getASR().then(() => {
       if (!graded && $('speak-card').style.display !== 'none') {
-        $('sp-fb').textContent = 'Bấm micro để ghi, đọc xong bấm lại để chấm';
+        $('sp-fb').textContent = 'Bấm micro để ghi, nói xong sẽ tự dừng';
         $('sp-fb').className = 'sp-fb';
       }
     }).catch(() => {});
@@ -2089,7 +2089,7 @@ function renderSpeak() {
   $('sp-vi').textContent          = c.vi;
   $('sp-fb').textContent          = (SPEECH_OK && !_preferWhisper)
     ? 'Bấm micro rồi đọc to chữ trên'
-    : 'Bấm micro để ghi, đọc xong bấm lại để chấm';
+    : 'Bấm micro để ghi, nói xong sẽ tự dừng';
   $('sp-fb').className            = 'sp-fb';
   $('sp-compare').style.display   = 'none';
   $('sp-mic').className           = 'sp-mic';
@@ -2106,7 +2106,13 @@ function renderSpeak() {
 const WHISPER_MODEL = 'Xenova/whisper-base';   // base ~75MB: cân bằng tốt, ổn định trên điện thoại
 let _asr = null, _asrLoading = null;
 let _media = null, _mediaStream = null, _chunks = [], _recording = false, _mediaTimer = null;
+let _vadRAF = null, _audioCtx = null;
 let _preferWhisper = false;   // bật khi Web Speech API lỗi dịch vụ (vd service-not-allowed)
+
+function stopVAD() {
+  if (_vadRAF) { cancelAnimationFrame(_vadRAF); _vadRAF = null; }
+  if (_audioCtx) { try { _audioCtx.close(); } catch {} _audioCtx = null; }
+}
 
 async function getASR() {
   if (_asr) return _asr;
@@ -2165,6 +2171,7 @@ function pickMime() {
 
 function abortWhisper() {
   clearTimeout(_mediaTimer);
+  stopVAD();
   _recording = false;
   if (_media) { try { _media.onstop = null; _media.stop(); } catch {} _media = null; }
   if (_mediaStream) { try { _mediaStream.getTracks().forEach(t => t.stop()); } catch {} _mediaStream = null; }
@@ -2183,6 +2190,7 @@ async function listenWhisper() {
   _chunks = [];
   _media.ondataavailable = e => { if (e.data && e.data.size) _chunks.push(e.data); };
   _media.onstop = async () => {
+    stopVAD();
     if (_mediaStream) { _mediaStream.getTracks().forEach(t => t.stop()); _mediaStream = null; }
     _recording = false;
     const blob = new Blob(_chunks, { type: (_media && _media.mimeType) || 'audio/webm' });
@@ -2205,10 +2213,43 @@ async function listenWhisper() {
   _recording = true;
   $('sp-mic').className   = 'sp-mic listening';
   $('sp-fb').className    = 'sp-fb';
-  $('sp-fb').textContent  = '🔴 Đang ghi… bấm lại để dừng & chấm';
+  $('sp-fb').textContent  = '🔴 Đang ghi… nói xong sẽ tự dừng';
   try { _media.start(200); } catch { abortWhisper(); return; }
+  startVAD();                          // tự dừng khi im lặng
   clearTimeout(_mediaTimer);
-  _mediaTimer = setTimeout(() => { if (_recording) stopWhisperRecording(); }, 6000);  // tự dừng sau 6s
+  _mediaTimer = setTimeout(() => { if (_recording) stopWhisperRecording(); }, 8000);  // chốt chặn 8s
+}
+
+// Phát hiện giọng nói: nói xong im ~1s thì tự dừng ghi
+function startVAD() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx || !_mediaStream) return;
+    _audioCtx = new Ctx();
+    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+    const src = _audioCtx.createMediaStreamSource(_mediaStream);
+    const an  = _audioCtx.createAnalyser();
+    an.fftSize = 512;
+    src.connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    const SPEAK_TH = 0.025, SILENCE_MS = 1000;
+    let spoke = false, silenceAt = 0;
+    const tick = () => {
+      if (!_recording) return;
+      an.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+      const rms = Math.sqrt(sum / buf.length);
+      const now = (performance && performance.now) ? performance.now() : 0;
+      if (rms > SPEAK_TH) { spoke = true; silenceAt = 0; }
+      else if (spoke) {
+        if (!silenceAt) silenceAt = now;
+        else if (now - silenceAt > SILENCE_MS) { stopWhisperRecording(); return; }
+      }
+      _vadRAF = requestAnimationFrame(tick);
+    };
+    _vadRAF = requestAnimationFrame(tick);
+  } catch {/* VAD lỗi vẫn còn chốt chặn 8s + bấm lại để dừng */}
 }
 
 function stopWhisperRecording() {
